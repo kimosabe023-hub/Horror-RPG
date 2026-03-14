@@ -1,315 +1,678 @@
-import random, time, json, os, threading
+"""
+Ultimate Haunted Mansion Horror – Expanded Nightmare Edition
+Features: inventory system with weight, sanity hallucinations, status effects, companion, multi-step puzzles
+"""
 
-# -------------------------
-# Helper Functions
-# -------------------------
-def slow_print(text, delay=0.03):
-    for char in text:
-        print(char, end='', flush=True)
+import random
+import time
+import json
+import os
+import threading
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Set
+
+# ────────────────────────────────────────────────
+# Config
+# ────────────────────────────────────────────────
+
+SAVE_FILE = "haunted_mansion_nightmare.json"
+SLOW_DELAY = 0.028
+PUZZLE_TIMEOUT = 45
+MAX_INVENTORY_WEIGHT = 18
+
+SANITY_TIERS = {
+    100: "clear",
+    70:  "uneasy",
+    50:  "unsettled",
+    35:  "distorted",
+    20:  "fractured",
+    10:  "shattered",
+     0:  "broken"
+}
+
+# ────────────────────────────────────────────────
+# Utilities
+# ────────────────────────────────────────────────
+
+def slow(s: str, delay: float = SLOW_DELAY):
+    for c in s:
+        print(c, end='', flush=True)
         time.sleep(delay)
     print()
 
-def timed_input(prompt, timeout=10, default=""):
-    user_input = [default]
-    def get_input():
-        user_input[0] = input(prompt)
-    thread = threading.Thread(target=get_input)
-    thread.start()
-    thread.join(timeout)
-    if thread.is_alive():
-        print(f"\nTime's up! Default choice: {default}")
-    return user_input[0]
 
-def clear_screen():
-    os.system('cls' if os.name=='nt' else 'clear')
+def timed_input(prompt: str, timeout: int = PUZZLE_TIMEOUT, default="") -> str:
+    res = [default]
+    def target():
+        try: res[0] = input(prompt).strip()
+        except: pass
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        print(f"\nTime's up → {default}")
+    return res[0]
+
+
+def cls():
+    os.system('cls' if os.name == 'nt' else 'clear')
+
 
 def pause():
-    input("\nPress Enter to continue...")
+    input("\n[ ⏎ ] ")
 
-# -------------------------
-# Player Class
-# -------------------------
-class Player:
-    def __init__(self, name):
-        self.name=name
-        self.health=100
-        self.sanity=100
-        self.stamina=100
-        self.inventory=[]
-        self.location='foyer'
-        self.alive=True
-        self.chapter=1
-        self.flags={}
-        self.cursed=False
-        self.traps_triggered=0
 
-    def show_stats(self):
-        print(f"\n[{self.name}'s Stats] Health: {self.health}, Sanity: {self.sanity}, Stamina: {self.stamina}")
-        print(f"Inventory: {', '.join(self.inventory) if self.inventory else 'Empty'}")
+# ────────────────────────────────────────────────
+# Data
+# ────────────────────────────────────────────────
 
-# -------------------------
-# Rooms and Puzzles
-# -------------------------
-rooms = {
-    'foyer': {'desc': "The mansion's foyer is dark. Chandelier sways, doors lead onward.", 'exits': ['hallway'], 'items': ['flashlight']},
-    'hallway': {'desc': "Narrow hallway. Eyes of portraits follow you.", 'exits': ['library','kitchen','attic','chapel','foyer'], 'items': []},
-    'library': {'desc': "Dusty books. Whispers echo.", 'exits': ['hallway','secret_room','attic_secret'], 'items': ['ancient tome'], 'puzzle': {'question': "I have keys but no locks, space but no room. What am I?", 'answer': "keyboard", 'reward': 'cursed amulet'}},
-    'secret_room': {'desc': "Hidden room with arcane symbols.", 'exits': ['library'], 'items': [], 'puzzle': {'question': "Speak the word that ends all words...", 'answer': "end", 'reward': 'magic crystal'}},
-    'attic_secret': {'desc': "Hidden attic space with forbidden books.", 'exits': ['attic'], 'items': ['forbidden tome'], 'puzzle': {'question': "Name the fear that stalks every mind...", 'answer': "darkness", 'reward': 'elder talisman'}},
-    'kitchen': {'desc': "Rotting food. Broken knives litter floor.", 'exits': ['hallway','basement','dining_room'], 'items': ['knife']},
-    'dining_room': {'desc': "Long dusty table. Silverware moves.", 'exits': ['kitchen','pantry'], 'items': ['candle']},
-    'pantry': {'desc': "Shelves filled with spoiled food.", 'exits': ['dining_room'], 'items': []},
-    'basement': {'desc': "Pitch black. Chains rattle. Something breathes.", 'exits': ['kitchen','hidden_lab','crypt'], 'items': ['key']},
-    'hidden_lab': {'desc': "Broken vials, strange fluids, shadows twitch.", 'exits': ['basement','tower'], 'items': ['healing potion']},
-    'attic': {'desc': "Cobwebs. Cold wind chills.", 'exits': ['hallway','tower'], 'items': ['ancient dagger']},
-    'tower': {'desc': "Wind howls. Eyes follow you.", 'exits': ['attic','hidden_lab','observatory','balcony'], 'items': ['mysterious scroll']},
-    'observatory': {'desc': "Broken telescope points to a blood-red moon.", 'exits': ['tower'], 'items': ['magic crystal']},
-    'chapel': {'desc': "Dusty chapel. Shadows twist.", 'exits': ['hallway'], 'items': ['holy water']},
-    'crypt': {'desc': "Cold crypt. Coffins rattle.", 'exits': ['basement'], 'items': ['ancient key']},
-    'balcony': {'desc': "High balcony. Wind dizzying.", 'exits': ['tower'], 'items': []},
-    'garden': {'desc': "Overgrown garden. Statues seem alive.", 'exits': ['foyer'], 'items': []},
-    'attic_secret2': {'desc': "A forbidden chamber with strange glowing symbols.", 'exits': ['attic'], 'items': ['curse scroll'], 'puzzle': {'question': "I bind the living to shadows, who am I?", 'answer': 'curse', 'reward': 'haunted ring'}},
-    'secret_hall': {'desc': "A dark secret hallway, walls drip black ichor.", 'exits': ['library','tower'], 'items': []},
-    'hidden_chamber': {'desc': "The mansion’s most forbidden chamber.", 'exits': ['secret_room'], 'items': ['elder staff']},
+@dataclass
+class Item:
+    name: str
+    desc: str
+    weight: int = 1
+    usable: bool = False
+    combat_bonus: int = 0
+    heal_hp: int = 0
+    heal_sanity: int = 0
+    cures: List[str] = None           # e.g. ["poisoned", "bleeding"]
+    examine_text: str = ""
+
+
+@dataclass
+class Status:
+    name: str
+    turns_left: int
+    hp_per_turn: int = 0
+    sanity_per_turn: int = 0
+    desc: str = ""
+
+
+@dataclass
+class PuzzleStep:
+    q: str
+    a: str
+    hint: str = ""
+    success: str = "Correct."
+    fail: str = "Wrong."
+
+
+@dataclass
+class Puzzle:
+    name: str
+    steps: List[PuzzleStep]
+    reward: str           # item name
+    flag: str
+
+
+@dataclass
+class NPC:
+    name: str
+    desc: str
+    greet: str
+    recruit_line: str
+    combat_line: str
+    combat_dmg: int = 0
+    recruited: bool = False
+
+
+@dataclass
+class Enemy:
+    name: str
+    hp: int
+    max_hp: int
+    sanity_hit: int
+    desc: str
+    atk_desc: str
+    dmg_low: int = 7
+    dmg_high: int = 24
+
+
+@dataclass
+class Room:
+    key: str
+    title: str
+    base_desc: str
+    exits: List[str]
+    items: List[str]                # item names
+    puzzle: Optional[Puzzle] = None
+    npc: Optional[NPC] = None
+    enter_event_chance: float = 0.0
+
+
+# ────────────────────────────────────────────────
+# Content
+# ────────────────────────────────────────────────
+
+ITEMS = {
+    "flashlight": Item("flashlight", "Old but bright", weight=2, examine_text="The beam flickers sometimes... like it's afraid."),
+    "iron_key":   Item("iron key", "Heavy, cold, engraved with thorns", weight=2),
+    "bandages":   Item("bandages", "Stained but usable", usable=True, heal_hp=20, cures=["bleeding"], weight=1),
+    "antidote":   Item("antidote vial", "Green liquid swirls inside", usable=True, cures=["poisoned"], weight=1),
+    "silver_knife": Item("silver knife", "Etched with protective runes", weight=2, usable=True, combat_bonus=18, examine_text="Feels warm when near spirits."),
+    "old_locket": Item("old locket", "Contains a faded photograph", usable=True, heal_sanity=30, weight=1,
+                       examine_text="Inside is a picture of a smiling child… the eyes follow you."),
+    "broken_mirror": Item("broken mirror shard", "Reflects things that aren't there", weight=2, combat_bonus=15,
+                          examine_text="Sometimes you see someone standing behind you in the reflection."),
 }
 
-# -------------------------
-# Enemy and Boss Classes
-# -------------------------
-class Enemy:
-    def __init__(self,name,health,sanity_damage,description):
-        self.name=name
-        self.health=health
-        self.sanity_damage=sanity_damage
-        self.description=description
-    def attack(self,player):
-        slow_print(f"\n{self.name} attacks!")
-        dmg=random.randint(5,25)
-        player.health-=dmg
-        player.sanity-=self.sanity_damage
-        slow_print(f"You lose {dmg} health and {self.sanity_damage} sanity! Health: {player.health}, Sanity: {player.sanity}")
+PUZZLES = {
+    "clock_riddle": Puzzle(
+        "clock_riddle",
+        [
+            PuzzleStep("What has a face and two hands but no arms or legs?", "clock"),
+            PuzzleStep("Now tell me what runs but never walks, has a bed but never sleeps.", "river"),
+            PuzzleStep("One last word — what is the sound of the house when it hungers?", "silence")
+        ],
+        "old_locket",
+        "clock_solved"
+    ),
+}
 
-ghosts=[Enemy("Restless Spirit",30,10,"A pale figure floats silently."),
-        Enemy("Wailing Specter",40,15,"A ghastly scream pierces your mind."),
-        Enemy("Creeping Shadow",25,5,"Something unseen brushes past your skin."),
-        Enemy("Dread Phantom",35,15,"A horrific figure lunges from the shadows.")]
+NPCS = {
+    "elena": NPC(
+        "Elena",
+        "Translucent maid, eyes full of sorrow",
+        "…you see me? Truly see me?",
+        "If you can end this nightmare… I will walk with you until the end.",
+        "I'll keep it busy — strike true!",
+        combat_dmg=11
+    )
+}
 
-bosses=[Enemy("Esai The Tormented",120,20,"A massive shadow towers with glowing eyes."),
-        Enemy("NovNod The Mad Alchemist",150,15,"A crazed scientist lunges with a broken vial."),
-        Enemy("Marcou's Esquire The Third",200,25,"An armored figure with flaming eyes blocks your path."),
-        Enemy("Raymond Omega",250,30,"An ancient evil with reality-bending powers.")]
+ENEMIES = {
+    "wraith": Enemy("Grieving Wraith", 60, 60, 15, "Woman in torn veil floats silently.", "Her wail tears at your mind."),
+    "crawling": Enemy("Crawling Remains", 75, 75, 9, "Twisted servant drags itself forward.", "Fingernails scrape stone."),
+}
 
-# -------------------------
-# Save/Load System
-# -------------------------
-SAVE_FILE="ultimate_horror_save.json"
-def save_game(player):
-    data={'name':player.name,'health':player.health,'sanity':player.sanity,'stamina':player.stamina,
-          'inventory':player.inventory,'location':player.location,'chapter':player.chapter,'flags':player.flags,'cursed':player.cursed,'traps_triggered':player.traps_triggered}
-    with open(SAVE_FILE,'w') as f:
-        json.dump(data,f)
-    slow_print("Game saved!")
+BOSSES = [
+    Enemy("Lady Seraphine", 200, 200, 26, "Black wedding dress drips ichor.", "Her grief drowns reality."),
+    Enemy("The House Avatar", 340, 340, 38, "Walls pulse like flesh. Eyes open.", "The mansion rejects you."),
+]
 
-def load_game():
-    if os.path.exists(SAVE_FILE):
-        with open(SAVE_FILE) as f:
-            data=json.load(f)
-            p=Player(data['name'])
-            p.health=data['health']
-            p.sanity=data['sanity']
-            p.stamina=data['stamina']
-            p.inventory=data['inventory']
-            p.location=data['location']
-            p.chapter=data.get('chapter',1)
-            p.flags=data.get('flags',{})
-            p.cursed=data.get('cursed',False)
-            p.traps_triggered=data.get('traps_triggered',0)
-            return p
-    return None
+ROOMS = {
+    "vestibule": Room(
+        "vestibule", "Vestibule of Decay",
+        "Cracked marble. Chandelier sways with no wind.",
+        ["great_hall", "west_wing"],
+        ["flashlight", "iron_key"]
+    ),
+    "great_hall": Room(
+        "great_hall", "Grand Hall",
+        "Portraits stare. The carpet smells of old blood.",
+        ["vestibule", "library", "servants", "dining"],
+        [],
+        enter_event_chance=0.30
+    ),
+    "library": Room(
+        "library", "Moldering Library",
+        "Books breathe when you're not looking.",
+        ["great_hall", "study"],
+        ["bandages"],
+        PUZZLES["clock_riddle"]
+    ),
+    "study": Room(
+        "study", "Hidden Study",
+        "One candle never dies. Papers written in something red.",
+        ["library"],
+        ["antidote", "silver_knife"]
+    ),
+    "servants": Room(
+        "servants", "Servants' Wing",
+        "Beds still unmade. One figure sits in the dark.",
+        ["great_hall", "kitchen"],
+        [],
+        npc=NPCS["elena"]
+    ),
+    "kitchen": Room(
+        "kitchen", "Butcher's Kitchen",
+        "Meat hooks sway. Something drips from the ceiling.",
+        ["servants", "cellar"],
+        ["broken_mirror"]
+    ),
+    "cellar": Room(
+        "cellar", "Deep Cellar",
+        "Chains. Damp. Breathing in the dark.",
+        ["kitchen"],
+        [],
+        enter_event_chance=0.45
+    ),
+}
 
-# -------------------------
-# Combat System
-# -------------------------
-def combat(player,enemy):
-    slow_print(f"\nYou encounter {enemy.name}! {enemy.description}")
-    while enemy.health>0 and player.alive:
-        slow_print("\nOptions: [attack] [flee] [use item]")
-        choice=input("> ").lower()
-        if choice=="attack":
-            dmg=random.randint(10,30)
-            enemy.health-=dmg
-            slow_print(f"You attack {enemy.name} for {dmg} damage!")
-        elif choice=="flee":
-            if random.random()>0.5:
-                slow_print("You escape!")
-                return
-            else:
-                slow_print("Failed to escape!")
-        elif choice=="use item":
-            if 'knife' in player.inventory:
-                slow_print("You slash with your knife!")
-                enemy.health-=random.randint(15,35)
-            elif 'healing potion' in player.inventory:
-                slow_print("You drink a healing potion!")
-                player.health+=random.randint(20,50)
-                player.inventory.remove('healing potion')
-            elif 'holy water' in player.inventory:
-                slow_print("You splash holy water!")
-                enemy.health-=random.randint(20,40)
-            else:
-                slow_print("Nothing useful!")
-        else:
-            slow_print("Invalid choice!")
-        if enemy.health>0:
-            enemy.attack(player)
-        if player.health<=0 or player.sanity<=0:
-            player.alive=False
-            slow_print("You succumbed to wounds or insanity...")
+# ────────────────────────────────────────────────
+# Player
+# ────────────────────────────────────────────────
+
+class Player:
+    def __init__(self, name: str):
+        self.name = name
+        self.hp = 100
+        self.max_hp = 100
+        self.sanity = 100
+        self.max_sanity = 100
+        self.inventory: List[str] = []
+        self.weight_carried = 0
+        self.location = "vestibule"
+        self.flags = set()
+        self.statuses: List[Status] = []
+        self.companion: Optional[NPC] = None
+        self.alive = True
+        self.ending = None
+
+    def inventory_weight(self) -> int:
+        return sum(ITEMS[it].weight for it in self.inventory)
+
+    def can_take(self, item_name: str) -> bool:
+        item = ITEMS[item_name]
+        return self.inventory_weight() + item.weight <= MAX_INVENTORY_WEIGHT
+
+    def add_item(self, name: str) -> bool:
+        if name not in ITEMS:
+            return False
+        if not self.can_take(name):
+            slow("It's too heavy... you can't carry more.")
+            return False
+        self.inventory.append(name)
+        slow(f"You take the {ITEMS[name].name}.")
+        return True
+
+    def remove_item(self, name: str) -> bool:
+        if name in self.inventory:
+            self.inventory.remove(name)
+            return True
+        return False
+
+    def use_item(self, name: str):
+        if name not in self.inventory:
+            slow("You don't have that.")
             return
-    slow_print(f"You defeated {enemy.name}!")
+        item = ITEMS[name]
 
-# -------------------------
-# Random Horror Events & Traps
-# -------------------------
-def random_event(player):
-    chance=random.random()
-    if chance<0.2:
-        combat(player,random.choice(ghosts))
-    elif 0.2<=chance<0.4:
-        slow_print("\nLights flicker. Footsteps echo...")
-        player.sanity-=5
-    elif 0.4<=chance<0.55:
-        slow_print("\nYou find a mysterious potion.")
-        player.inventory.append('healing potion')
-    elif 0.55<=chance<0.7:
-        slow_print("\nCold wind chills you. Sanity drops slightly.")
-        player.sanity-=5
-    elif 0.7<=chance<0.85:
-        slow_print("\nA hidden trap triggers!")
-        dmg=random.randint(10,25)
-        player.health-=dmg
-        player.traps_triggered+=1
-        slow_print(f"You take {dmg} damage from the trap! Health: {player.health}")
-    else:
-        slow_print("\nAll is quiet... for now.")
-
-# -------------------------
-# Puzzle & Chapter System
-# -------------------------
-def check_chapter_progress(player):
-    if player.chapter==1 and 'key' in player.inventory and not player.flags.get('chapter1_boss'):
-        slow_print("\nThe key vibrates. A shadow approaches...")
-        player.flags['chapter1_boss']=True
-        player.chapter=2
-        slow_print("\n--- Chapter 2: The Haunting Deepens ---")
-        combat(player,random.choice(bosses))
-    if player.chapter==2 and 'cursed amulet' in player.inventory and not player.flags.get('chapter2_boss'):
-        slow_print("\nThe cursed amulet screams. Something ancient awakens...")
-        player.flags['chapter2_boss']=True
-        player.chapter=3
-        slow_print("\n--- Chapter 3: Confront the Haunted ---")
-        combat(player,random.choice(bosses))
-    if player.chapter==3 and 'elder talisman' in player.inventory and not player.flags.get('final_boss'):
-        slow_print("\nA terrifying presence fills the mansion...")
-        player.flags['final_boss']=True
-        slow_print("\n--- Final Chapter: The Elder Horror ---")
-        combat(player,Enemy("Elder Horror",300,35,"The mansion itself warps reality!"))
-
-def solve_puzzle(player, room):
-    puzzle=rooms[room].get('puzzle')
-    if puzzle and not player.flags.get(f"puzzle_{room}"):
-        answer=timed_input(f"\nPuzzle: {puzzle['question']}\nYour answer (30 sec): ",30,"")
-        if answer.strip().lower()==puzzle['answer']:
-            slow_print("Correct! You receive: "+puzzle['reward'])
-            player.inventory.append(puzzle['reward'])
-            player.flags[f"puzzle_{room}"]=True
+        if item.usable:
+            if item.heal_hp:
+                old = self.hp
+                self.hp = min(self.max_hp, self.hp + item.heal_hp)
+                slow(f"HP restored: +{self.hp - old}")
+            if item.heal_sanity:
+                old = self.sanity
+                self.sanity = min(self.max_sanity, self.sanity + item.heal_sanity)
+                slow(f"Sanity restored: +{self.sanity - old}")
+            if item.cures:
+                for s in item.cures:
+                    self.statuses = [st for st in self.statuses if st.name.lower() != s.lower()]
+                    slow(f"You are no longer {s}.")
+            self.remove_item(name)
         else:
-            slow_print("Incorrect! Sanity drops.")
-            player.sanity-=10
-            player.flags[f"puzzle_{room}"]=True
+            slow("That item cannot be used right now.")
 
-# -------------------------
-# Dynamic Room Description
-# -------------------------
-def describe_room(player):
-    room=rooms[player.location]
-    desc=room['desc']
-    if player.sanity<50:
-        desc+="\nShadows twist unnaturally, and whispers taunt you."
-    if player.sanity<20:
-        desc+="\nReality shatters. The mansion is alive and malevolent."
-    slow_print(desc)
+    def examine_item(self, name: str):
+        if name in self.inventory and name in ITEMS:
+            item = ITEMS[name]
+            slow(f"\n{item.name.upper()}")
+            slow(item.desc)
+            if item.examine_text:
+                slow("→ " + item.examine_text)
+        else:
+            slow("You don't have that.")
 
-# -------------------------
-# Main Game Loop
-# -------------------------
-def game_loop(player):
-    while player.alive:
-        clear_screen()
-        slow_print(f"\n--- You are in {player.location} ---")
-        describe_room(player)
-        player.show_stats()
-        if rooms[player.location]['items']:
-            slow_print(f"You see: {', '.join(rooms[player.location]['items'])}")
-        slow_print(f"Exits: {', '.join(rooms[player.location]['exits'])}")
-        solve_puzzle(player,player.location)
-        slow_print("\nWhat will you do? [move] [take] [inventory] [save] [quit]")
-        action=input("> ").lower()
-        if action=="move":
-            dest=input("Where? ").lower()
-            if dest in rooms[player.location]['exits']:
-                player.location=dest
-                random_event(player)
-                check_chapter_progress(player)
+    def get_sanity_tier(self) -> str:
+        for thresh, tier in sorted(SANITY_TIERS.items(), reverse=True):
+            if self.sanity >= thresh:
+                return tier
+        return "broken"
+
+    def hallucination(self):
+        tier = self.get_sanity_tier()
+        hallucinations = {
+            "uneasy":    ["The wallpaper seems to pulse slowly…", "You thought you heard your name…"],
+            "unsettled": ["Footsteps behind you… but you're alone.", "The portraits blink when you look away."],
+            "distorted": ["The floor tilts… or is it your mind?", "Your shadow moves before you do."],
+            "fractured": ["Someone is standing right behind you…", "The walls are breathing your name."],
+            "shattered": ["You see yourself lying dead in the corner.", "The house whispers: you were never alive."],
+            "broken":    ["Reality folds. You are the house now."],
+        }
+        msg = random.choice(hallucinations.get(tier, hallucinations["uneasy"]))
+        slow("\n" + msg)
+        if tier in ("fractured", "shattered", "broken"):
+            self.sanity -= random.randint(2, 7)
+            slow(f"Sanity slips further... ({self.sanity})")
+
+    def tick(self):
+        to_remove = []
+        for s in self.statuses:
+            if s.hp_per_turn:     self.hp     -= s.hp_per_turn
+            if s.sanity_per_turn: self.sanity -= s.sanity_per_turn
+            s.turns_left -= 1
+            if s.turns_left <= 0:
+                to_remove.append(s)
+                slow(f"→ {s.name} wears off.")
+        for r in to_remove:
+            self.statuses.remove(r)
+
+        # Hallucinations based on sanity
+        if self.sanity <= 70:
+            if random.random() < (100 - self.sanity) / 120:
+                self.hallucination()
+
+        if self.sanity <= 0:
+            self.alive = False
+            self.ending = "madness"
+
+
+# ────────────────────────────────────────────────
+# Game Logic
+# ────────────────────────────────────────────────
+
+def horror_event(p: Player, chance: float):
+    if random.random() > chance: return
+    roll = random.random()
+    if roll < 0.30:
+        p.sanity -= random.randint(5,12)
+        slow("→ Something cold brushes your neck… sanity slips.")
+    elif roll < 0.55:
+        p.statuses.append(Status("Bleeding", 4, hp_per_turn=4, desc="Blood drips steadily."))
+    elif roll < 0.80:
+        p.statuses.append(Status("Poisoned", 5, hp_per_turn=5, sanity_per_turn=4, desc="Venom burns inside."))
+    else:
+        p.statuses.append(Status("Terrified", 3, sanity_per_turn=10, desc="You can barely breathe."))
+
+
+def combat(p: Player, enemy: Enemy) -> bool:
+    cls()
+    slow(f"\n{enemy.name} emerges!\n{enemy.desc}\n")
+
+    while enemy.hp > 0 and p.alive:
+        p.tick()
+        if not p.alive: break
+
+        print(f"  HP {p.hp}/{p.max_hp}   Sanity {p.sanity}/{p.max_sanity}")
+        if p.statuses:
+            print("  Status: " + ", ".join(s.name for s in p.statuses))
+        print("\n  [a]ttack   [i]tem   [f]lee" + ("   [c]ompanion" if p.companion else ""))
+        act = input("  > ").strip().lower()
+
+        if act in ("a", "attack"):
+            base = random.randint(9, 22)
+            bonus = sum(ITEMS[it].combat_bonus for it in p.inventory)
+            dmg = base + bonus
+            enemy.hp -= dmg
+            slow(f"You strike for {dmg} damage.")
+
+        elif act == "i":
+            if not p.inventory:
+                slow("Nothing useful.")
+                continue
+            slow("Inventory: " + ", ".join(p.inventory))
+            which = input("Use which? > ").strip().lower()
+            if which in p.inventory:
+                p.use_item(which)
             else:
-                slow_print("Can't go that way.")
-        elif action=="take":
-            if rooms[player.location]['items']:
-                item=rooms[player.location]['items'].pop(0)
-                player.inventory.append(item)
-                slow_print(f"You picked up {item}.")
+                slow("No such item.")
+
+        elif act in ("f", "flee"):
+            chance = 0.55
+            if p.companion: chance += 0.20
+            if random.random() < chance:
+                slow("You escape!")
+                return True
+            slow("You can't get away!")
+
+        elif act == "c" and p.companion:
+            enemy.hp -= p.companion.combat_dmg
+            slow(f"{p.companion.name}: {p.companion.combat_line} → {p.companion.combat_dmg} dmg")
+
+        if enemy.hp > 0:
+            dmg = random.randint(enemy.dmg_low, enemy.dmg_high)
+            p.hp -= dmg
+            p.sanity -= enemy.sanity_hit
+            slow(f"{enemy.atk_desc} → -{dmg} HP   sanity-{enemy.sanity_hit}")
+
+        if p.hp <= 0 or p.sanity <= 0:
+            p.alive = False
+            return False
+
+    slow(f"\n{enemy.name} collapses / fades / dies.")
+    return True
+
+
+def describe_room(p: Player):
+    room = ROOMS[p.location]
+    tier = p.get_sanity_tier()
+
+    distorted_desc = room.base_desc
+    if tier in ("distorted", "fractured", "shattered", "broken"):
+        add = random.choice([
+            "…the corners bend inward…",
+            "…everything is slightly too red…",
+            "…you hear breathing behind the walls…"
+        ])
+        distorted_desc += add
+
+    slow(f"\n════ {room.title.upper()} ════")
+    slow(distorted_desc)
+
+    if room.items:
+        names = [ITEMS[it].name for it in room.items]
+        slow(f"\nYou see: {', '.join(names)}")
+
+    if room.npc and not room.npc.recruited:
+        slow(f"\n→ {room.npc.desc}")
+
+    print(f"\nExits: {', '.join(ROOMS[e].title for e in room.exits)}")
+
+
+def try_recruit(p: Player, npc: NPC):
+    if npc.recruited: return
+    slow(f"\n{npc.name}: {npc.greet}")
+    if input("  Try to gain her trust? [y/N] → ").lower().startswith('y'):
+        slow(npc.recruit_line)
+        npc.recruited = True
+        p.companion = npc
+        slow(f"{npc.name} now follows you… quietly.")
+    else:
+        slow("She lowers her gaze and fades slightly.")
+
+
+def solve_puzzle(p: Player, puzzle: Puzzle):
+    if puzzle.flag in p.flags: return
+
+    slow(f"\n┌─ {puzzle.name.replace('_',' ').title()} ─┐")
+
+    for i, step in enumerate(puzzle.steps, 1):
+        slow(f" {i}. {step.q}")
+        if step.hint and input("  Hint? [y/N] → ").lower().startswith('y'):
+            slow(f"  → {step.hint}")
+
+        ans = timed_input("  > ", PUZZLE_TIMEOUT, "").lower()
+        if ans != step.a.lower():
+            slow(step.fail)
+            p.sanity -= 14
+            p.flags.add(puzzle.flag)
+            return
+        slow(step.success)
+
+    slow("\nPuzzle complete.")
+    if puzzle.reward:
+        p.add_item(puzzle.reward)
+    p.flags.add(puzzle.flag)
+
+
+def game_loop(p: Player):
+    while p.alive and not p.ending:
+        cls()
+        describe_room(p)
+
+        print(f"\nHP {p.hp} | Sanity {p.sanity} | Weight {p.inventory_weight()}/{MAX_INVENTORY_WEIGHT}")
+        if p.statuses:
+            print("Status: " + ", ".join(s.name for s in p.statuses))
+        if p.companion:
+            print(f"Companion: {p.companion.name}")
+
+        room = ROOMS[p.location]
+
+        # Enter event
+        if random.random() < room.enter_event_chance:
+            horror_event(p, 1.0)
+
+        # Puzzle
+        if room.puzzle and room.puzzle.flag not in p.flags:
+            solve_puzzle(p, room.puzzle)
+
+        # NPC
+        if room.npc and not room.npc.recruited:
+            try_recruit(p, room.npc)
+
+        print("\n m = move   t = take   drop = drop   use = use")
+        print(" inv = inventory   ex = examine   s = save   q = quit")
+        cmd = input("\n> ").strip().lower()
+
+        if cmd in ("m", "move"):
+            print("\nWhere?")
+            for i,e in enumerate(room.exits,1):
+                print(f" {i}) {ROOMS[e].title}")
+            choice = input("> ").strip()
+            try: dest = room.exits[int(choice)-1]
+            except: dest = choice
+            if dest in room.exits:
+                p.location = dest
+                p.tick()
             else:
-                slow_print("Nothing to take here.")
-        elif action=="inventory":
-            player.show_stats()
+                slow("No such path.")
+
+        elif cmd in ("t", "take"):
+            if room.items:
+                it = room.items.pop(0)
+                if p.add_item(it):
+                    pass
+            else:
+                slow("Nothing here.")
+
+        elif cmd == "drop":
+            if not p.inventory:
+                slow("Nothing to drop.")
+                continue
+            slow("Inventory: " + ", ".join(p.inventory))
+            which = input("Drop what? > ").strip().lower()
+            if p.remove_item(which):
+                slow(f"Dropped {which}.")
+            else:
+                slow("No such item.")
+
+        elif cmd == "use":
+            if not p.inventory:
+                slow("Nothing to use.")
+                continue
+            slow("Inventory: " + ", ".join(p.inventory))
+            which = input("Use what? > ").strip().lower()
+            p.use_item(which)
+
+        elif cmd == "ex" or cmd == "examine":
+            which = input("Examine what? > ").strip().lower()
+            p.examine_item(which)
+
+        elif cmd == "inv":
+            if not p.inventory:
+                slow("Inventory empty.")
+            else:
+                slow("Carrying:")
+                for it in p.inventory:
+                    print(f" • {ITEMS[it].name}  ({ITEMS[it].weight} kg) — {ITEMS[it].desc}")
             pause()
-        elif action=="save":
-            save_game(player)
-        elif action=="quit":
-            slow_print("Exiting game...")
-            break
-        else:
-            slow_print("Unknown action.")
-        if player.sanity<=0:
-            slow_print("\nYour mind shatters. You cannot continue...")
-            player.alive=False
-    slow_print("\nGame Over.")
-    if player.sanity<=0 and player.cursed:
-        slow_print("You became fully cursed and trapped forever in the mansion...")
-    elif player.sanity<=0:
-        slow_print("You went insane, lost in shadows forever...")
-    elif player.alive:
-        slow_print("You survived... but the mansion's curse lingers.")
 
-# -------------------------
-# Main
-# -------------------------
-def main():
-    clear_screen()
-    slow_print("Welcome to the Ultimate Haunted Mansion Horror RPG - Ultimate Edition!")
-    choice=input("Load previous game? [y/n] ").lower()
-    if choice=='y':
-        player=load_game()
-        if not player:
-            slow_print("No saved game found.")
-            name=input("Enter your name: ")
-            player=Player(name)
+        elif cmd in ("s", "save"):
+            save_game(p)
+            pause()
+
+        elif cmd in ("q", "quit"):
+            if input("Quit? [y/N] ").lower().startswith('y'):
+                break
+
+        # Ending conditions
+        if p.sanity <= 0:
+            p.ending = "madness"
+        if p.hp <= 0:
+            p.ending = "death"
+        # You can add victory condition here (e.g. defeat final boss + escape flag)
+
+    ending_screen(p)
+
+
+def ending_screen(p: Player):
+    cls()
+    slow("\n" + "═"*70 + "\n")
+    if p.ending == "madness":
+        slow("  YOUR MIND SHATTERED")
+        slow("  You are now part of the house. Forever.")
+    elif p.ending == "death":
+        slow("  YOUR BODY FAILED")
+        slow("  Another portrait added to the collection.")
     else:
-        name=input("Enter your name: ")
-        player=Player(name)
-    slow_print("\nSurvive the mansion, solve puzzles, fight bosses, keep sanity, uncover secrets...")
+        slow("  YOU WALKED AWAY… FOR NOW")
+        slow("  But the house remembers your name.")
+    slow("\n" + "═"*70 + "\n")
     pause()
-    game_loop(player)
 
-if __name__=="__main__":
+
+def save_game(p: Player):
+    data = {
+        "name": p.name,
+        "hp": p.hp,
+        "sanity": p.sanity,
+        "location": p.location,
+        "inventory": p.inventory,
+        "flags": list(p.flags),
+        "companion": p.companion.name if p.companion else None,
+    }
+    with open(SAVE_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+    slow("Game saved.")
+
+
+def load_game() -> Optional[Player]:
+    if not os.path.exists(SAVE_FILE): return None
+    try:
+        with open(SAVE_FILE) as f:
+            d = json.load(f)
+        p = Player(d["name"])
+        p.hp = d["hp"]
+        p.sanity = d["sanity"]
+        p.location = d["location"]
+        p.inventory = d["inventory"]
+        p.flags = set(d["flags"])
+        if d.get("companion"):
+            npc = NPCS.get(d["companion"])
+            if npc:
+                npc.recruited = True
+                p.companion = npc
+        return p
+    except:
+        return None
+
+
+# ────────────────────────────────────────────────
+# Entry
+# ────────────────────────────────────────────────
+
+def main():
+    cls()
+    slow("  ULTIMATE HAUNTED MANSION – NIGHTMARE EDITION")
+    slow("  inventory • hallucinations • companion • dread\n")
+
+    p = None
+    if input("Load previous torment? [y/N] → ").lower().startswith('y'):
+        p = load_game()
+        if p:
+            slow(f"The house remembers you, {p.name}…")
+
+    if not p:
+        name = input("Who dares enter? ").strip() or "Forgotten"
+        p = Player(name)
+
+    slow(f"\nWelcome back… {p.name}")
+    slow("The doors are already closing behind you.")
+    pause()
+    game_loop(p)
+
+
+if __name__ == "__main__":
     main()
